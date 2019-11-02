@@ -1,1 +1,25 @@
-project(niepce)
+cmake_minimum_required(VERSION 3.7 FATAL_ERROR)
+project(hikari)
+
+enable_language(CXX)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+find_package(Vulkan)
+if(NOT Vulkan_FOUND)
+  message(FATAL_ERROR "Could not find Vulkan library.")
+else()
+  message(STATUS ${Vulkan_LIBRARY})
+endif()
+
+find_package(glfw3)
+if(NOT glfw3_FOUND)
+  message(FATAL_ERROR "Could not find GLFW library.")
+else()
+  message(STATUS ${glfw3_LIBRARY})
+endif()
+
+file(GLOB SOURCE ./src/*.cc)
+add_executable(${PROJECT_NAME} ${SOURCE})
+target_link_libraries(${PROJECT_NAME} ${glfw3_LIBRARY} ${Vulkan_LIBRARY})
