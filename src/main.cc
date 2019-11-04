@@ -1,297 +1,457 @@
-
+#include <fstream>
 #include <iostream>
 #include <sstream>
-#include <vector>
 
-#define GLFW_INCLUDE_VULKAN
-#include <GLFW/glfw3.h>
-#include <GLFW/glfw3native.h>
-
-#include <vulkan/vk_layer.h>
+#define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
+#define VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE 1
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan.hpp>
 
-static const std::string kApplicationName = "Renderer";
+constexpr uint32_t kWidth  = 512;
+constexpr uint32_t kHeight = 512;
 
-#ifndef NDEBUG
-#define VK_CHECK( call )                                                                \
-  do                                                                                    \
-  {                                                                                     \
-    const VkResult res = call;                                                          \
-    if ( res != VK_SUCCESS )                                                            \
-    {                                                                                   \
-      std::stringstream ss;                                                             \
-      ss << "Vulkan call '" << #call << "' failed: " __FILE__ ":" << __LINE__ << ")\n"; \
-      throw std::runtime_error( ss.str().c_str() );                                     \
-    }                                                                                   \
-  } while (0);
-#else
-#define VK_CHECK( call )
-#endif
-
-constexpr uint32_t kWindowWidth  = 640;
-constexpr uint32_t kWindowHeight = 480;
-
-VkInstance                       instance_;
-VkPhysicalDevice                 physical_device_;
-VkPhysicalDeviceMemoryProperties physical_device_memory_properties_;
-uint32_t                         graphics_queue_index_;
-VkDevice                         device_;
-VkQueue                          device_queue_;
-VkCommandPool                    command_pool_;
-VkSurfaceKHR                     surface_;
-VkSurfaceFormatKHR               surface_format_;
-VkSurfaceCapabilitiesKHR         surface_capabilities_;
-VkPresentModeKHR                 present_mode_;
-VkSwapchainKHR                   swapchain_;
-VkExtent2D                       swapchain_extent_;
-
-GLFWwindow* window_;
-
-void CreateInstance()
+static VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessageCallback(VkDebugReportFlagsEXT      flags,
+                                                           VkDebugReportObjectTypeEXT objectType,
+                                                           uint64_t object, size_t location,
+                                                           int32_t     messageCode,
+                                                           const char *pLayerPrefix,
+                                                           const char *pMessage, void *pUserData)
 {
-  /*
-    Vulkan API を利用するために必須なオブジェクト
-  */
-
-  std::vector<const char *> extensions;
-
-  // 全ての拡張情報名を取得する
-  std::vector<VkExtensionProperties> properties;
+  VkBool32 ret = VK_FALSE;
+  if (flags & VK_DEBUG_REPORT_INFORMATION_BIT_EXT ||
+    flags & VK_DEBUG_REPORT_DEBUG_BIT_EXT)
   {
+    ret = VK_TRUE;
+  }
+  std::stringstream ss;
+  if (pLayerPrefix)
+  {
+    ss << "[" << pLayerPrefix << "] ";
+  }
+  ss << pMessage << std::endl;
+  std::cerr << ss.str().c_str() << std::endl;
+
+  return ret;
+}
+
+class VkRenderer
+{
+public:
+  VkRenderer()
+  {
+    const auto appinfo = vk::ApplicationInfo(nullptr, 1, nullptr, 1, VK_API_VERSION_1_1);
+
     /*
-      全ての拡張機能を有効にして初期化する、デフォルトは無効
-      vkEnumerateinstanceextensionproperties１回目は個数を取得、２回目は個数分の領域を確保してから情報を取得する
+      Instance creation
     */
-    uint32_t property_count = 0;
-    vkEnumerateInstanceExtensionProperties(nullptr, &property_count, nullptr);
-    properties.resize(property_count);
-    vkEnumerateInstanceExtensionProperties(nullptr, &property_count, properties.data());
+    uint32_t layer_count = 1;
+    const char* validationLayers[] = { "VK_LAYER_LUNARG_standard_validation" };
 
-    for (const auto &p : properties)
+    std::vector<const char*> layers;
+#ifdef DEBUG
+    layers.push_back("VK_LAYER_LUNARG_standard_validation");
+#endif // DEBUG
+
+    // Enable all extensions
+    const auto extension_properties = vk::enumerateInstanceExtensionProperties();
+    std::vector<const char*> extensions;
+    for(const auto& e : extension_properties)
     {
-      extensions.push_back(p.extensionName);
+      extensions.push_back(e.extensionName);
+    }
+
+    auto instance_create_info = vk::InstanceCreateInfo({},
+                                                       &appinfo,
+                                                       static_cast<uint32_t>(layers.size()),
+                                                       layers.data(),
+                                                       static_cast<uint32_t>(extensions.size()),
+                                                       extensions.data());
+    instance_ = vk::createInstanceUnique(instance_create_info);
+
+#ifdef DEBUG
+    auto debug_report_callback_create_info = vk::DebugReportCallbackCreateInfoEXT(vk::DebugReportFlagBitsEXT::eError
+                                                                                  | vk::DebugReportFlagBitsEXT::eWarning
+                                                                                  | vk::DebugReportFlagBitsEXT::ePerformanceWarning
+                                                                                  | vk::DebugReportFlagBitsEXT::eInformation,
+                                                                                  (PFN_vkDebugReportCallbackEXT)DebugMessageCallback,
+                                                                                  nullptr);
+
+    auto ext = reinterpret_cast<PFN_vkCreateDebugReportCallbackEXT>(instance_->getProcAddr("vkCreateDebugReportCallbackEXT"));
+    assert(ext);
+    debug_report_callback_ = instance_->createDebugReportCallbackEXT(debug_report_callback_create_info);
+#endif // DEBUG
+
+    /*
+      Device creation
+    */
+    physical_device_ = instance_->enumeratePhysicalDevices()[0]; // 見つけた一番最初のデバイスを使う
+
+    // Request a single graphics queue
+    const float default_queue_priority = 1.0f;
+    const auto queue_family_properties = physical_device_.getQueueFamilyProperties();
+
+    // Get the first index into queueFamilyProperties which support graphics.
+    graphics_queue_family_index_
+      = std::distance(queue_family_properties.begin(),
+                      std::find_if(queue_family_properties.begin(),
+                                   queue_family_properties.end(),
+                                   [](const vk::QueueFamilyProperties& qfp)
+                                   {
+                                     return qfp.queueFlags & vk::QueueFlagBits::eGraphics;
+                                   }));
+    assert(graphics_queue_family_index_ < queue_family_properties.size());
+
+    // Create logical device
+    auto device_queue_create_info = vk::DeviceQueueCreateInfo(vk::DeviceQueueCreateFlags(),
+                                                              static_cast<uint32_t>(graphics_queue_family_index_),
+                                                              1,
+                                                              &default_queue_priority);
+    std::vector<const char*> device_extensions;
+    const auto device_extension_properties = physical_device_.enumerateDeviceExtensionProperties();
+    device_extensions.resize(device_extensions.size());
+
+    for(const auto& ext : device_extension_properties)
+    {
+      device_extensions.push_back(ext.extensionName);
+    }
+
+    // Enable all extensions
+    auto device_create_info = vk::DeviceCreateInfo(vk::DeviceCreateFlags(), 1, &device_queue_create_info);
+    device_create_info.setPpEnabledExtensionNames(device_extensions.data());
+    device_create_info.setEnabledExtensionCount(device_extensions.size());
+    device_ = physical_device_.createDeviceUnique(device_create_info);
+
+    /*
+      Get a graphics queue
+    */
+    device_->getQueue(graphics_queue_family_index_, 0, &queue_);
+
+    /*
+      Create command pool
+    */
+    auto command_pool_create_info = vk::CommandPoolCreateInfo(vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+                                                              graphics_queue_family_index_);
+    command_pool_ = device_->createCommandPoolUnique(command_pool_create_info);
+
+    /*
+      Create view image
+    */
+    auto color_image_create_info = vk::ImageCreateInfo({},
+                                                       vk::ImageType::e2D,
+                                                       vk::Format::eR8G8B8A8Unorm,
+                                                       vk::Extent3D(kWidth, kHeight, 1),
+                                                       1, 1, vk::SampleCountFlagBits::e1,
+                                                       vk::ImageTiling::eOptimal,
+                                                       vk::ImageUsageFlagBits::eColorAttachment
+                                                       | vk::ImageUsageFlagBits::eTransferSrc,
+                                                       vk::SharingMode::eExclusive,
+                                                       0, 0, vk::ImageLayout::eUndefined);
+    color_image_ = device_->createImageUnique(color_image_create_info);
+
+    // Allocate memory for color image, and bind it.
+    auto memory_requirement   = device_->getImageMemoryRequirements(color_image_.get());
+    auto memory_allocate_info = vk::MemoryAllocateInfo(memory_requirement.size,
+                                                       MemoryTypeIndex(memory_requirement.memoryTypeBits,
+                                                                       vk::MemoryPropertyFlagBits::eDeviceLocal));
+    color_image_memory_ = device_->allocateMemoryUnique(memory_allocate_info);
+    device_->bindImageMemory(color_image_.get(), color_image_memory_.get(), 0);
+
+    // 描画先として ImageView を作成する
+    auto view_create_info = vk::ImageViewCreateInfo({},
+                                                    color_image_.get(),
+                                                    vk::ImageViewType::e2D,
+                                                    vk::Format::eR8G8B8A8Unorm,
+                                                    vk::ComponentMapping(vk::ComponentSwizzle::eR,
+                                                                         vk::ComponentSwizzle::eG,
+                                                                         vk::ComponentSwizzle::eB,
+                                                                         vk::ComponentSwizzle::eA),
+                                                    vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
+    color_image_view_ = device_->createImageViewUnique(view_create_info);
+
+    /*
+      Create render pass
+    */
+    std::array<vk::AttachmentDescription, 1> attachment_descriptions {};
+    auto& color = attachment_descriptions[0];
+
+    color = vk::AttachmentDescription(vk::AttachmentDescriptionFlags(),
+                                      vk::Format::eR8G8B8A8Unorm,
+                                      vk::SampleCountFlagBits::e1,
+                                      vk::AttachmentLoadOp::eClear,
+                                      vk::AttachmentStoreOp::eStore,
+                                      vk::AttachmentLoadOp::eDontCare,
+                                      vk::AttachmentStoreOp::eDontCare,
+                                      vk::ImageLayout::eUndefined,
+                                      vk::ImageLayout::eTransferSrcOptimal);
+
+    const auto color_reference
+      = vk::AttachmentReference(0, vk::ImageLayout::eColorAttachmentOptimal);
+
+    auto subpass_description = vk::SubpassDescription();
+    subpass_description.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics);
+    subpass_description.setColorAttachmentCount(1);
+    subpass_description.setPColorAttachments(&color_reference);
+
+    auto render_pass_create_info
+      = vk::RenderPassCreateInfo(vk::RenderPassCreateFlags(),
+                                 attachment_descriptions.size(),
+                                 attachment_descriptions.data(),
+                                 1,
+                                 &subpass_description);
+
+    render_pass_ = device_->createRenderPassUnique(render_pass_create_info);
+
+    /*
+      Framebuffer creation
+    */
+    auto framebuffer_create_info = vk::FramebufferCreateInfo(vk::FramebufferCreateFlags(),
+                                                             render_pass_.get(),
+                                                             1, // Color attachment only
+                                                             &(color_image_view_.get()),
+                                                             kWidth,
+                                                             kHeight,
+                                                             1);
+    framebuffer_ = device_->createFramebufferUnique(framebuffer_create_info);
+
+    /*
+      Command buffer creation
+    */
+    auto command_buffer_allocate_info = vk::CommandBufferAllocateInfo(command_pool_.get(),
+                                                                      vk::CommandBufferLevel::ePrimary,
+                                                                      1);
+    command_buffer_ = std::move(device_->allocateCommandBuffersUnique(command_buffer_allocate_info)[0]);
+
+    /*
+      Write commands to Command buffer
+    */
+    auto clear_value = vk::ClearValue(vk::ClearColorValue(std::array<uint32_t, 4>{128, 64, 64, 255}));
+
+    auto command_begin_info = vk::CommandBufferBeginInfo();
+    command_buffer_->begin(command_begin_info);
+    command_buffer_->end();
+
+    /*
+      Begin render pass
+    */
+    auto render_begin_info = vk::RenderPassBeginInfo(render_pass_.get(),
+                                                     framebuffer_.get(),
+                                                     vk::Rect2D(kWidth, kHeight),
+                                                     1,
+                                                     &clear_value);
+    command_buffer_->beginRenderPass(render_begin_info, vk::SubpassContents::eInline);
+    command_buffer_->endRenderPass();
+
+    /*
+      Submit commands to device queue
+    */
+    auto submit_info = vk::SubmitInfo();
+    submit_info.setCommandBufferCount(1);
+    submit_info.setPCommandBuffers(&(command_buffer_.get()));
+
+    auto fence_create_info = vk::FenceCreateInfo();
+    auto fence             = device_->createFenceUnique(fence_create_info);
+
+    queue_.submit(submit_info, fence.get());
+
+    device_->waitForFences(1, &(fence.get()), VK_TRUE, UINT64_MAX);
+
+    /*
+      Copy framebuffer data to host.
+    */
+    const char *imagedata;
+    {
+      // Create the linear tiled destination image to copy to and to read the memory from
+      auto imgCreateInfo = vk::ImageCreateInfo();
+      imgCreateInfo.imageType     = vk::ImageType::e2D;
+      imgCreateInfo.format        = vk::Format::eR8G8B8A8Unorm;
+      imgCreateInfo.extent.width  = kWidth;
+      imgCreateInfo.extent.height = kHeight;
+      imgCreateInfo.extent.depth  = 1;
+      imgCreateInfo.arrayLayers   = 1;
+      imgCreateInfo.mipLevels     = 1;
+      imgCreateInfo.initialLayout = vk::ImageLayout::eUndefined;
+      imgCreateInfo.samples       = vk::SampleCountFlagBits::e1;
+      imgCreateInfo.tiling        = vk::ImageTiling::eLinear;
+      imgCreateInfo.usage         = vk::ImageUsageFlagBits::eTransferDst;
+
+      // Create the image
+      auto dstImage = device_->createImageUnique(imgCreateInfo);
+
+      // Create memory to back up the image
+      auto memAllocInfo    = vk::MemoryAllocateInfo();
+      auto memRequirements = device_->getImageMemoryRequirements(dstImage.get());
+      memAllocInfo.allocationSize = memRequirements.size;
+      // Memory must be host visible to copy from
+      memAllocInfo.memoryTypeIndex = MemoryTypeIndex(memRequirements.memoryTypeBits,
+                                                     vk::MemoryPropertyFlagBits::eHostVisible
+                                                     | vk::MemoryPropertyFlagBits::eHostCoherent);
+      auto dstImageMemory = device_->allocateMemoryUnique(memAllocInfo);
+      device_->bindImageMemory(dstImage.get(), dstImageMemory.get(), 0);
+
+      // Do the actual blit from the offscreen image to our host visible destination image
+      auto cmdBufAllocateInfo = vk::CommandBufferAllocateInfo(command_pool_.get(), vk::CommandBufferLevel::ePrimary, 1);
+      auto copyCmd = device_->allocateCommandBuffers(cmdBufAllocateInfo)[0];
+      auto cmdBufInfo = vk::CommandBufferBeginInfo();
+      copyCmd.begin(cmdBufInfo);
+
+      // Transition destination image to transfer destination layout
+      auto image_barrier          = vk::ImageMemoryBarrier();
+      image_barrier.srcAccessMask = {};
+      image_barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+      image_barrier.oldLayout     = vk::ImageLayout::eUndefined;
+      image_barrier.newLayout     = vk::ImageLayout::eTransferDstOptimal;
+      image_barrier.image         = dstImage.get();
+      image_barrier.subresourceRange
+        = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+      copyCmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                              vk::PipelineStageFlagBits::eTransfer,
+                              {},
+                              0,
+                              nullptr,
+                              0,
+                              nullptr,
+                              1,
+                              &image_barrier);
+      // colorAttachment.image is already in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, and does not need
+      // to be transitioned
+      auto imageCopyRegion = vk::ImageCopy();
+      imageCopyRegion.srcSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+      imageCopyRegion.srcSubresource.layerCount = 1;
+      imageCopyRegion.dstSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+      imageCopyRegion.dstSubresource.layerCount = 1;
+      imageCopyRegion.extent.width              = kWidth;
+      imageCopyRegion.extent.height             = kHeight;
+      imageCopyRegion.extent.depth              = 1;
+
+      copyCmd.copyImage(color_image_.get(),
+                        vk::ImageLayout::eTransferSrcOptimal,
+                        dstImage.get(),
+                        vk::ImageLayout::eTransferDstOptimal,
+                        imageCopyRegion);
+
+      // Transition destination image to general layout, which is the required layout for mapping
+      // the image memory later on
+      auto image_barrier2          = vk::ImageMemoryBarrier();
+      image_barrier2.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+      image_barrier2.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
+      image_barrier2.oldLayout     = vk::ImageLayout::eTransferDstOptimal;
+      image_barrier2.newLayout     = vk::ImageLayout::eGeneral;
+      image_barrier2.image         = dstImage.get();
+      image_barrier2.subresourceRange
+        = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+      copyCmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                              vk::PipelineStageFlagBits::eTransfer,
+                              {},
+                              0,
+                              nullptr,
+                              0,
+                              nullptr,
+                              1,
+                              &image_barrier2);
+
+      copyCmd.end();
+
+      auto submitInfo               = vk::SubmitInfo();
+      submitInfo.commandBufferCount = 1;
+      submitInfo.pCommandBuffers    = &copyCmd;
+      auto fence = device_->createFenceUnique(vk::FenceCreateInfo());
+      queue_.submit(1, &submitInfo, fence.get());
+      device_->waitForFences(1, &(fence.get()), VK_TRUE, UINT64_MAX);
+
+      // Get layout of the image (including row pitch)
+      auto subResource       = vk::ImageSubresource();
+      subResource.aspectMask = vk::ImageAspectFlagBits::eColor;
+      auto subResourceLayout = vk::SubresourceLayout();
+
+      device_->getImageSubresourceLayout(dstImage.get(), &subResource, &subResourceLayout);
+
+      // Map image memory so we can start copying from it
+      imagedata = reinterpret_cast<const char*>(device_->mapMemory(dstImageMemory.get(), 0, vk::DeviceSize()));
+      imagedata += subResourceLayout.offset;
+
+      /*
+        Save host visible framebuffer image to disk (ppm format)
+      */
+      std::ofstream file("headless.ppm", std::ios::out | std::ios::binary);
+
+      // ppm header
+      file << "P6\n" << kWidth << "\n" << kHeight << "\n" << 255 << "\n";
+
+      // If source is BGR (destination is always RGB) and we can't use blit (which does automatic
+      // conversion), we'll have to manually swizzle color components Check if source is BGR and
+      // needs swizzle
+      std::vector<VkFormat> formatsBGR   = {VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM,
+                                          VK_FORMAT_B8G8R8A8_SNORM};
+      const bool            colorSwizzle = (std::find(formatsBGR.begin(), formatsBGR.end(),
+                                           VK_FORMAT_R8G8B8A8_UNORM) != formatsBGR.end());
+
+      // ppm binary pixel data
+      for (int32_t y = 0; y < kHeight; y++)
+      {
+        unsigned int *row = (unsigned int *)imagedata;
+        for (int32_t x = 0; x < kWidth; x++)
+        {
+          if (colorSwizzle)
+          {
+            file.write((char *)row + 2, 1);
+            file.write((char *)row + 1, 1);
+            file.write((char *)row, 1);
+          }
+          else
+          {
+            file.write((char *)row, 3);
+          }
+          row++;
+        }
+        imagedata += subResourceLayout.rowPitch;
+      }
+      file.close();
     }
   }
 
-  VkApplicationInfo app_info{};
-  app_info.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-  app_info.pApplicationName = kApplicationName.c_str();
-  app_info.pEngineName      = kApplicationName.c_str();
-  app_info.apiVersion       = VK_API_VERSION_1_1;
-  app_info.engineVersion    = VK_MAKE_VERSION(1, 0, 0);
+  ~VkRenderer() {}
 
-  VkInstanceCreateInfo create_info{};
-  create_info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-  create_info.enabledExtensionCount   = static_cast<uint32_t>(extensions.size());
-  create_info.ppEnabledExtensionNames = extensions.data();
-  create_info.pApplicationInfo        = &app_info;
-#ifndef NDEBUG
-  const char *layers[]            = {"VK_LAYER_LUNARG_standard_validation"};
-  create_info.enabledLayerCount   = 1;
-  create_info.ppEnabledLayerNames = layers;
-#endif
-
-  const auto result = vkCreateInstance(&create_info, nullptr, &instance_);
-  VK_CHECK(result);
-}
-
-void SelectPhysicalDevice()
-{
-  /*
-    物理的に接続されている GPU を検出する
-  */
-  std::vector<VkPhysicalDevice> physical_devices;
+  uint32_t MemoryTypeIndex(uint32_t type_bits, vk::MemoryPropertyFlags flags)
   {
-    uint32_t physical_device_count = 0;
-    vkEnumeratePhysicalDevices(instance_, &physical_device_count, nullptr);
-
-    physical_devices.resize(physical_device_count);
-    vkEnumeratePhysicalDevices(instance_, &physical_device_count, physical_devices.data());
-  }
-
-  physical_device_ = physical_devices[0];
-  vkGetPhysicalDeviceMemoryProperties(physical_device_, &physical_device_memory_properties_);
-}
-
-void FindGraphicsQueueIndex()
-{
-  /*
-    CPU から GPU へ書き込んだコマンドを流すパイプ
-    デバイスキューのは処理ができる内容によって区分けがされている
-  */
-
-  std::vector<VkQueueFamilyProperties> properties;
-  {
-    uint32_t propertiy_count;
-    vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &propertiy_count, nullptr);
-
-    properties.resize(propertiy_count);
-    vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &propertiy_count, properties.data());
-  }
-
-  for (int i = 0; i < properties.size(); ++i)
-  {
-    if (properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+    const auto prop = physical_device_.getMemoryProperties();
+    for (uint32_t i = 0; i < prop.memoryTypeCount; i++)
     {
-      graphics_queue_index_ = i;
-      break;
+      if ((type_bits & 1) == 1)
+      {
+        if ((prop.memoryTypes[i].propertyFlags & flags) == flags)
+        {
+          return i;
+        }
+      }
+      type_bits >>= 1;
     }
-  }
-}
-
-void CreateDevice()
-{
-  /*
-    論理デバイス作成
-  */
-
-  const float kDefaultQueuePriority(1.0f);
-
-  VkDeviceQueueCreateInfo device_queue_create_info{};
-  device_queue_create_info.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-  device_queue_create_info.queueFamilyIndex = graphics_queue_index_;
-  device_queue_create_info.queueCount       = 1;
-  device_queue_create_info.pQueuePriorities = &kDefaultQueuePriority;
-
-  // 論理デバイス拡張を全て取得する
-  std::vector<VkExtensionProperties> extension_properties;
-  {
-    uint32_t extension_count = 0;
-    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &extension_count, nullptr);
-
-    extension_properties.resize(extension_count);
-    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &extension_count,
-                                         extension_properties.data());
+    return 0;
   }
 
-  std::vector<const char *> extensions;
-  for (const auto &p : extension_properties)
-  {
-    extensions.push_back(p.extensionName);
-  }
+private:
+  vk::UniqueInstance       instance_;
+  vk::PhysicalDevice       physical_device_;
+  vk::UniqueDevice         device_;
+  vk::Queue                queue_;
+  std::size_t              graphics_queue_family_index_;
 
-  VkDeviceCreateInfo device_create_info{};
-  device_create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-  device_create_info.pQueueCreateInfos       = &device_queue_create_info;
-  device_create_info.queueCreateInfoCount    = 1;
-  device_create_info.ppEnabledExtensionNames = extensions.data();
-  device_create_info.enabledExtensionCount   = static_cast<uint32_t>(extensions.size());
+  vk::UniqueCommandPool   command_pool_;
+  vk::UniqueCommandBuffer command_buffer_;
+  vk::UniqueRenderPass    render_pass_;
 
-  // 論理デバイス作成
-  auto result = vkCreateDevice(physical_device_, &device_create_info, nullptr, &device_);
-  VK_CHECK(result);
+  vk::UniqueImage          color_image_;
+  vk::UniqueDeviceMemory   color_image_memory_;
+  vk::UniqueImageView      color_image_view_;
 
-  // デバイスキュー取得
-  vkGetDeviceQueue(device_, graphics_queue_index_, 0, &device_queue_);
-}
+  vk::UniqueFramebuffer    framebuffer_;
 
-void CreateCommandPool()
-{
-  /*
-    Comamnd buffer は GPU に命令を送るためのコマンドバッファを保持する
-  */
-  VkCommandPoolCreateInfo command_pool_create_info{};
-  command_pool_create_info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-  command_pool_create_info.queueFamilyIndex = graphics_queue_index_;
-  command_pool_create_info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-
-  const auto result =
-      vkCreateCommandPool(device_, &command_pool_create_info, nullptr, &command_pool_);
-  VK_CHECK(result);
-}
-
-void SelectSurfaceFormat(VkFormat format)
-{
-  std::vector<VkSurfaceFormatKHR> surface_formats;
-  {
-    uint32_t surface_format_count;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device_, surface_, &surface_format_count,
-                                         nullptr);
-
-    surface_formats.resize(surface_format_count);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device_, surface_, &surface_format_count,
-                                         surface_formats.data());
-  }
-
-  // 引数と同じフォーマットを探す
-  for (const auto &f : surface_formats)
-  {
-    if (f.format == format)
-    {
-      surface_format_ = f;
-    }
-  }
-}
-
-void CreateSwapChain()
-{
-  /*
-    描画された結果をディスプレイ上に表示するためのもの
-    事前に Surface の生成
-      -> 表示フォーマット決定
-      -> サーフェスサイズ取得
-      -> Preset モード確認
-    をしてから swapchain を生成する
-  */
-  auto extent = surface_capabilities_.currentExtent;
-  if (extent.width == ~0u)
-  {
-    // 任意サイズが可能なので window のサイズと同じにする
-    int w, h;
-    glfwGetWindowSize(window_, &w, &h);
-    extent.width  = static_cast<uint32_t>(w);
-    extent.height = static_cast<uint32_t>(h);
-  }
-
-  uint32_t queue_family_indices[] = {graphics_queue_index_};
-  VkSwapchainCreateInfoKHR swapchain_create_info{};
-  swapchain_create_info.sType                 = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-  swapchain_create_info.surface               = surface_;
-  swapchain_create_info.minImageCount         = std::max(2u, surface_capabilities_.minImageCount);
-  swapchain_create_info.imageFormat           = surface_format_.format;
-  swapchain_create_info.imageColorSpace       = surface_format_.colorSpace;
-  swapchain_create_info.imageExtent           = extent;
-  swapchain_create_info.imageUsage            = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-  swapchain_create_info.preTransform          = surface_capabilities_.currentTransform;
-  swapchain_create_info.imageArrayLayers      = 1;
-  swapchain_create_info.imageSharingMode      = VK_SHARING_MODE_EXCLUSIVE;
-  swapchain_create_info.queueFamilyIndexCount = 0;
-  swapchain_create_info.presentMode           = present_mode_;
-  swapchain_create_info.oldSwapchain          = VK_NULL_HANDLE;
-  swapchain_create_info.clipped               = VK_TRUE;
-  swapchain_create_info.compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-
-  const auto result = vkCreateSwapchainKHR(device_, &swapchain_create_info, nullptr, &swapchain_);
-  VK_CHECK(result);
-
-  swapchain_extent_ = extent;
-}
+  vk::DebugReportCallbackEXT debug_report_callback_;
+};
 
 int main(int argc, char *argv[])
 {
-  if (!glfwInit())
-  {
-    std::cerr << "Failed to initialize GLFW3." << std::endl;
-    return -1;
-  }
-  glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-  glfwWindowHint(GLFW_RESIZABLE, 0);
-  window_ =
-      glfwCreateWindow(kWindowWidth, kWindowHeight, kApplicationName.c_str(), nullptr, nullptr);
-
-  CreateInstance();
-  SelectPhysicalDevice();
-  FindGraphicsQueueIndex();
-  CreateDevice();
-  CreateCommandPool();
-
-  VkBool32 is_support;
-  glfwCreateWindowSurface(instance_, window_, nullptr, &surface_);
-  SelectSurfaceFormat(VK_FORMAT_R8G8B8A8_UNORM);
-  present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
-  vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device_, surface_, &surface_capabilities_);
-  vkGetPhysicalDeviceSurfaceSupportKHR(physical_device_, graphics_queue_index_, surface_, &is_support);
-  CreateSwapChain();
-
+  auto renderer = VkRenderer();
   return 0;
 }
