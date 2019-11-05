@@ -2,6 +2,10 @@
 #include <iostream>
 #include <sstream>
 
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+#include <GLFW/glfw3native.h>
+
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #define VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE 1
 #include <vulkan/vulkan.h>
@@ -9,6 +13,7 @@
 
 constexpr uint32_t kWidth  = 512;
 constexpr uint32_t kHeight = 512;
+GLFWwindow* kWindow = nullptr;
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessageCallback(VkDebugReportFlagsEXT      flags,
                                                            VkDebugReportObjectTypeEXT objectType,
@@ -134,18 +139,69 @@ public:
     command_pool_ = device_->createCommandPoolUnique(command_pool_create_info);
 
     /*
+      Create surface
+    */
+    auto psurface = VkSurfaceKHR(surface_.get());
+    const auto err = glfwCreateWindowSurface(VkInstance(instance_.get()), kWindow, nullptr, &psurface);
+    if (err)
+    {
+      std::cout << "Failed to create glfw3 surface." << std::endl;
+    }
+    surface_ = vk::UniqueSurfaceKHR(psurface);
+
+    // Select surface format
+    const auto formats = physical_device_.getSurfaceFormatsKHR(surface_.get());
+    for (const auto& f : formats)
+    {
+      if (f.format == vk::Format::eR8G8B8A8Unorm)
+      {
+        surface_format_ = f;
+      }
+    }
+    // capabilities
+    surface_capabilities_ = physical_device_.getSurfaceCapabilitiesKHR(surface_.get());
+
+    /*
+      Create Swapchain
+    */
+    std::cout << "Create Swapchain" << std::endl;
+    const auto image_count = std::max(2u, surface_capabilities_.maxImageCount);
+    auto       extent      = surface_capabilities_.currentExtent;
+    if (extent.width == ~0u)
+    {
+      // 任意サイズが利用可能なのでウィンドウサイズを利用する
+      int w, h;
+      glfwGetWindowSize(kWindow, &w, &h);
+      extent = vk::Extent2D(w, h);
+    }
+
+    auto swapchain_create_info = vk::SwapchainCreateInfoKHR({},
+                                                            surface_.get(),
+                                                            image_count,
+                                                            surface_format_.format,
+                                                            surface_format_.colorSpace,
+                                                            extent,
+                                                            1,
+                                                            vk::ImageUsageFlagBits::eColorAttachment,
+                                                            vk::SharingMode::eExclusive,
+                                                            0,
+                                                            nullptr,
+                                                            surface_capabilities_.currentTransform,
+                                                            vk::CompositeAlphaFlagBitsKHR::eOpaque,
+                                                            vk::PresentModeKHR::eFifo,
+                                                            VK_TRUE,
+                                                            nullptr);
+    swapchain_ = device_->createSwapchainKHRUnique(swapchain_create_info);
+    swapchain_extent_ = extent;
+
+    /*
       Create view image
     */
-    auto color_image_create_info = vk::ImageCreateInfo({},
-                                                       vk::ImageType::e2D,
-                                                       vk::Format::eR8G8B8A8Unorm,
-                                                       vk::Extent3D(kWidth, kHeight, 1),
-                                                       1, 1, vk::SampleCountFlagBits::e1,
-                                                       vk::ImageTiling::eOptimal,
-                                                       vk::ImageUsageFlagBits::eColorAttachment
-                                                       | vk::ImageUsageFlagBits::eTransferSrc,
-                                                       vk::SharingMode::eExclusive,
-                                                       0, 0, vk::ImageLayout::eUndefined);
+    auto color_image_create_info = vk::ImageCreateInfo(
+        {}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, vk::Extent3D(kWidth, kHeight, 1), 1, 1,
+        vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+        vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc,
+        vk::SharingMode::eExclusive, 0, 0, vk::ImageLayout::eUndefined);
     color_image_ = device_->createImageUnique(color_image_create_info);
 
     // Allocate memory for color image, and bind it.
@@ -447,11 +503,40 @@ private:
 
   vk::UniqueFramebuffer    framebuffer_;
 
+  vk::UniqueSwapchainKHR     swapchain_;
+  vk::Extent2D               swapchain_extent_;
+
+  vk::UniqueSurfaceKHR       surface_;
+  vk::SurfaceFormatKHR       surface_format_;
+  vk::SurfaceCapabilitiesKHR surface_capabilities_;
+
   vk::DebugReportCallbackEXT debug_report_callback_;
 };
 
 int main(int argc, char *argv[])
 {
+  if (!glfwInit())
+  {
+    std::cerr << "Failed to initialize GLFW3." << std::endl;
+    return -1;
+  }
+  if (!glfwVulkanSupported())
+  {
+    std::cerr << "GLFW3 does not support Vulkan." << std::endl;
+    return -1;
+  }
+
+  glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+  glfwWindowHint(GLFW_RESIZABLE, 0);
+  kWindow = glfwCreateWindow(kWidth, kHeight, "Vulkan", nullptr, nullptr);
+
   auto renderer = VkRenderer();
+
+  while (glfwWindowShouldClose(kWindow) == GLFW_FALSE)
+  {
+    glfwPollEvents();
+  }
+  glfwTerminate();
+
   return 0;
 }
