@@ -141,6 +141,7 @@ public:
     /*
       Create surface
     */
+    std::cout << "Create surface" << std::endl;
     auto psurface = VkSurfaceKHR(surface_.get());
     const auto err = glfwCreateWindowSurface(VkInstance(instance_.get()), kWindow, nullptr, &psurface);
     if (err)
@@ -164,7 +165,7 @@ public:
     /*
       Create Swapchain
     */
-    std::cout << "Create Swapchain" << std::endl;
+    std::cout << "Create swapchain" << std::endl;
     const auto image_count = std::max(2u, surface_capabilities_.maxImageCount);
     auto       extent      = surface_capabilities_.currentExtent;
     if (extent.width == ~0u)
@@ -172,6 +173,7 @@ public:
       // 任意サイズが利用可能なのでウィンドウサイズを利用する
       int w, h;
       glfwGetWindowSize(kWindow, &w, &h);
+      std::cout << w << " x " << h << std::endl;
       extent = vk::Extent2D(w, h);
     }
 
@@ -195,276 +197,121 @@ public:
     swapchain_extent_ = extent;
 
     /*
-      Create view image
+      Create depth buffer.
     */
-    auto color_image_create_info = vk::ImageCreateInfo(
-        {}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, vk::Extent3D(kWidth, kHeight, 1), 1, 1,
-        vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
-        vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc,
-        vk::SharingMode::eExclusive, 0, 0, vk::ImageLayout::eUndefined);
-    color_image_ = device_->createImageUnique(color_image_create_info);
+    std::cout << "Create depth image as depthbuffer." << std::endl;
+    auto depth_image_create_info = vk::ImageCreateInfo({},
+                                                       vk::ImageType::e2D,
+                                                       vk::Format::eD32Sfloat,
+                                                       vk::Extent3D(swapchain_extent_, 1),
+                                                       1,
+                                                       1,
+                                                       vk::SampleCountFlagBits::e1,
+                                                       vk::ImageTiling::eOptimal,
+                                                       vk::ImageUsageFlagBits::eDepthStencilAttachment,
+                                                       vk::SharingMode::eExclusive,
+                                                       0,
+                                                       nullptr,
+                                                       vk::ImageLayout::eUndefined);
+    depth_image_ = device_->createImageUnique(depth_image_create_info);
 
-    // Allocate memory for color image, and bind it.
-    auto memory_requirement   = device_->getImageMemoryRequirements(color_image_.get());
-    auto memory_allocate_info = vk::MemoryAllocateInfo(memory_requirement.size,
-                                                       MemoryTypeIndex(memory_requirement.memoryTypeBits,
-                                                                       vk::MemoryPropertyFlagBits::eDeviceLocal));
-    color_image_memory_ = device_->allocateMemoryUnique(memory_allocate_info);
-    device_->bindImageMemory(color_image_.get(), color_image_memory_.get(), 0);
+    auto depth_memory_requirement = device_->getImageMemoryRequirements(depth_image_.get());
+    auto depth_memory_type_index  = MemoryTypeIndex(depth_memory_requirement.memoryTypeBits,
+                                                    vk::MemoryPropertyFlagBits::eDeviceLocal);
+    auto depth_memory_allocate_info = vk::MemoryAllocateInfo(depth_memory_requirement.size,
+                                                             depth_memory_type_index);
+    depth_image_memory_ = device_->allocateMemoryUnique(depth_memory_allocate_info);
+    device_->bindImageMemory(depth_image_.get(), depth_image_memory_.get(), 0);
 
-    // 描画先として ImageView を作成する
-    auto view_create_info = vk::ImageViewCreateInfo({},
-                                                    color_image_.get(),
-                                                    vk::ImageViewType::e2D,
-                                                    vk::Format::eR8G8B8A8Unorm,
-                                                    vk::ComponentMapping(vk::ComponentSwizzle::eR,
-                                                                         vk::ComponentSwizzle::eG,
-                                                                         vk::ComponentSwizzle::eB,
-                                                                         vk::ComponentSwizzle::eA),
-                                                    vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
-    color_image_view_ = device_->createImageViewUnique(view_create_info);
+    /*
+      View creation
+    */
+    std::cout << "Create views" << std::endl;
+    auto swapchain_images = device_->getSwapchainImagesKHR(swapchain_.get());
+    for (auto& image : swapchain_images)
+    {
+      // スワップチェインが保持するイメージの数だけ View を作成する
+      auto view_create_info = vk::ImageViewCreateInfo();
+      view_create_info.setViewType(vk::ImageViewType::e2D);
+      view_create_info.setFormat(surface_format_.format);
+      view_create_info.setComponents(vk::ComponentMapping(vk::ComponentSwizzle::eR,
+                                                          vk::ComponentSwizzle::eG,
+                                                          vk::ComponentSwizzle::eB,
+                                                          vk::ComponentSwizzle::eA));
+      auto subresourcerange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor,0, 1, 0, 1);
+      view_create_info.setSubresourceRange(subresourcerange);
+      view_create_info.setImage(image);
+
+      swapchain_image_views_.push_back(std::move(device_->createImageViewUnique(view_create_info)));
+    }
+    {
+      // Depth buffer
+      auto view_create_info = vk::ImageViewCreateInfo();
+      view_create_info.setViewType(vk::ImageViewType::e2D);
+      view_create_info.setFormat(vk::Format::eD32Sfloat);
+      view_create_info.setComponents(vk::ComponentMapping(vk::ComponentSwizzle::eR,
+                                                          vk::ComponentSwizzle::eG,
+                                                          vk::ComponentSwizzle::eB,
+                                                          vk::ComponentSwizzle::eA));
+      auto subresourcerange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eDepth,0, 1, 0, 1);
+      view_create_info.setSubresourceRange(subresourcerange);
+      view_create_info.setImage(depth_image_.get());
+
+      depth_image_view_ = device_->createImageViewUnique(view_create_info);
+    }
 
     /*
       Create render pass
+
+      アタッチメントは単一画像と解釈できる。これを１アタッチメントとして
+      RenderPass にたして入出力の定義をする
     */
-    std::array<vk::AttachmentDescription, 1> attachment_descriptions {};
-    auto& color = attachment_descriptions[0];
+    std::cout << "Create renderpass." << std::endl;
+    std::array<vk::AttachmentDescription, 2> attachments;
 
-    color = vk::AttachmentDescription(vk::AttachmentDescriptionFlags(),
-                                      vk::Format::eR8G8B8A8Unorm,
-                                      vk::SampleCountFlagBits::e1,
-                                      vk::AttachmentLoadOp::eClear,
-                                      vk::AttachmentStoreOp::eStore,
-                                      vk::AttachmentLoadOp::eDontCare,
-                                      vk::AttachmentStoreOp::eDontCare,
-                                      vk::ImageLayout::eUndefined,
-                                      vk::ImageLayout::eTransferSrcOptimal);
+    // Swapchainn の color 分
+    attachments[0].setFormat(surface_format_.format);
+    attachments[0].setSamples(vk::SampleCountFlagBits::e1);
+    attachments[0].setLoadOp(vk::AttachmentLoadOp::eClear);
+    attachments[0].setStoreOp(vk::AttachmentStoreOp::eStore);
+    attachments[0].setStencilLoadOp(vk::AttachmentLoadOp::eDontCare);
+    attachments[0].setStencilStoreOp(vk::AttachmentStoreOp::eDontCare);
+    attachments[0].setInitialLayout(vk::ImageLayout::eUndefined);
+    attachments[0].setFinalLayout(vk::ImageLayout::ePresentSrcKHR);
 
-    const auto color_reference
-      = vk::AttachmentReference(0, vk::ImageLayout::eColorAttachmentOptimal);
+    // Depth buffer 分
+    attachments[1].setFormat(vk::Format::eD32Sfloat);
+    attachments[1].setSamples(vk::SampleCountFlagBits::e1);
+    attachments[1].setLoadOp(vk::AttachmentLoadOp::eClear);
+    attachments[1].setStoreOp(vk::AttachmentStoreOp::eStore);
+    attachments[1].setStencilLoadOp(vk::AttachmentLoadOp::eDontCare);
+    attachments[1].setStencilStoreOp(vk::AttachmentStoreOp::eDontCare);
+    attachments[1].setInitialLayout(vk::ImageLayout::eUndefined);
+    attachments[1].setFinalLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal);
 
+    /*
+      Attachment Description と対応するようにする必要がある
+      ex) attachment[0] は color attachemnt なので color_reference の attachment (第一引数) は 0 になる
+    */
+    auto color_reference = vk::AttachmentReference(0, vk::ImageLayout::eColorAttachmentOptimal);
+    auto depth_reference = vk::AttachmentReference(1, vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
+    /*
+      レンダーパスは複数のサプパスを保持することが可能
+      リソースの依存関係を設定する
+    */
     auto subpass_description = vk::SubpassDescription();
     subpass_description.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics);
     subpass_description.setColorAttachmentCount(1);
     subpass_description.setPColorAttachments(&color_reference);
+    subpass_description.setPDepthStencilAttachment(&depth_reference);
 
-    auto render_pass_create_info
-      = vk::RenderPassCreateInfo(vk::RenderPassCreateFlags(),
-                                 attachment_descriptions.size(),
-                                 attachment_descriptions.data(),
-                                 1,
-                                 &subpass_description);
+    auto renderpass_create_info = vk::RenderPassCreateInfo();
+    renderpass_create_info.setAttachmentCount(attachments.size());
+    renderpass_create_info.setSubpassCount(1);
+    renderpass_create_info.setPSubpasses(&subpass_description);
 
-    render_pass_ = device_->createRenderPassUnique(render_pass_create_info);
-
-    /*
-      Framebuffer creation
-    */
-    auto framebuffer_create_info = vk::FramebufferCreateInfo(vk::FramebufferCreateFlags(),
-                                                             render_pass_.get(),
-                                                             1, // Color attachment only
-                                                             &(color_image_view_.get()),
-                                                             kWidth,
-                                                             kHeight,
-                                                             1);
-    framebuffer_ = device_->createFramebufferUnique(framebuffer_create_info);
-
-    /*
-      Command buffer creation
-    */
-    auto command_buffer_allocate_info = vk::CommandBufferAllocateInfo(command_pool_.get(),
-                                                                      vk::CommandBufferLevel::ePrimary,
-                                                                      1);
-    command_buffer_ = std::move(device_->allocateCommandBuffersUnique(command_buffer_allocate_info)[0]);
-
-    /*
-      Write commands to Command buffer
-    */
-    auto clear_value = vk::ClearValue(vk::ClearColorValue(std::array<uint32_t, 4>{128, 64, 64, 255}));
-
-    auto command_begin_info = vk::CommandBufferBeginInfo();
-    command_buffer_->begin(command_begin_info);
-    command_buffer_->end();
-
-    /*
-      Begin render pass
-    */
-    auto render_begin_info = vk::RenderPassBeginInfo(render_pass_.get(),
-                                                     framebuffer_.get(),
-                                                     vk::Rect2D(kWidth, kHeight),
-                                                     1,
-                                                     &clear_value);
-    command_buffer_->beginRenderPass(render_begin_info, vk::SubpassContents::eInline);
-    command_buffer_->endRenderPass();
-
-    /*
-      Submit commands to device queue
-    */
-    auto submit_info = vk::SubmitInfo();
-    submit_info.setCommandBufferCount(1);
-    submit_info.setPCommandBuffers(&(command_buffer_.get()));
-
-    auto fence_create_info = vk::FenceCreateInfo();
-    auto fence             = device_->createFenceUnique(fence_create_info);
-
-    queue_.submit(submit_info, fence.get());
-
-    device_->waitForFences(1, &(fence.get()), VK_TRUE, UINT64_MAX);
-
-    /*
-      Copy framebuffer data to host.
-    */
-    const char *imagedata;
-    {
-      // Create the linear tiled destination image to copy to and to read the memory from
-      auto imgCreateInfo = vk::ImageCreateInfo();
-      imgCreateInfo.imageType     = vk::ImageType::e2D;
-      imgCreateInfo.format        = vk::Format::eR8G8B8A8Unorm;
-      imgCreateInfo.extent.width  = kWidth;
-      imgCreateInfo.extent.height = kHeight;
-      imgCreateInfo.extent.depth  = 1;
-      imgCreateInfo.arrayLayers   = 1;
-      imgCreateInfo.mipLevels     = 1;
-      imgCreateInfo.initialLayout = vk::ImageLayout::eUndefined;
-      imgCreateInfo.samples       = vk::SampleCountFlagBits::e1;
-      imgCreateInfo.tiling        = vk::ImageTiling::eLinear;
-      imgCreateInfo.usage         = vk::ImageUsageFlagBits::eTransferDst;
-
-      // Create the image
-      auto dstImage = device_->createImageUnique(imgCreateInfo);
-
-      // Create memory to back up the image
-      auto memAllocInfo    = vk::MemoryAllocateInfo();
-      auto memRequirements = device_->getImageMemoryRequirements(dstImage.get());
-      memAllocInfo.allocationSize = memRequirements.size;
-      // Memory must be host visible to copy from
-      memAllocInfo.memoryTypeIndex = MemoryTypeIndex(memRequirements.memoryTypeBits,
-                                                     vk::MemoryPropertyFlagBits::eHostVisible
-                                                     | vk::MemoryPropertyFlagBits::eHostCoherent);
-      auto dstImageMemory = device_->allocateMemoryUnique(memAllocInfo);
-      device_->bindImageMemory(dstImage.get(), dstImageMemory.get(), 0);
-
-      // Do the actual blit from the offscreen image to our host visible destination image
-      auto cmdBufAllocateInfo = vk::CommandBufferAllocateInfo(command_pool_.get(), vk::CommandBufferLevel::ePrimary, 1);
-      auto copyCmd = device_->allocateCommandBuffers(cmdBufAllocateInfo)[0];
-      auto cmdBufInfo = vk::CommandBufferBeginInfo();
-      copyCmd.begin(cmdBufInfo);
-
-      // Transition destination image to transfer destination layout
-      auto image_barrier          = vk::ImageMemoryBarrier();
-      image_barrier.srcAccessMask = {};
-      image_barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
-      image_barrier.oldLayout     = vk::ImageLayout::eUndefined;
-      image_barrier.newLayout     = vk::ImageLayout::eTransferDstOptimal;
-      image_barrier.image         = dstImage.get();
-      image_barrier.subresourceRange
-        = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
-
-      copyCmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-                              vk::PipelineStageFlagBits::eTransfer,
-                              {},
-                              0,
-                              nullptr,
-                              0,
-                              nullptr,
-                              1,
-                              &image_barrier);
-      // colorAttachment.image is already in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, and does not need
-      // to be transitioned
-      auto imageCopyRegion = vk::ImageCopy();
-      imageCopyRegion.srcSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
-      imageCopyRegion.srcSubresource.layerCount = 1;
-      imageCopyRegion.dstSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
-      imageCopyRegion.dstSubresource.layerCount = 1;
-      imageCopyRegion.extent.width              = kWidth;
-      imageCopyRegion.extent.height             = kHeight;
-      imageCopyRegion.extent.depth              = 1;
-
-      copyCmd.copyImage(color_image_.get(),
-                        vk::ImageLayout::eTransferSrcOptimal,
-                        dstImage.get(),
-                        vk::ImageLayout::eTransferDstOptimal,
-                        imageCopyRegion);
-
-      // Transition destination image to general layout, which is the required layout for mapping
-      // the image memory later on
-      auto image_barrier2          = vk::ImageMemoryBarrier();
-      image_barrier2.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
-      image_barrier2.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
-      image_barrier2.oldLayout     = vk::ImageLayout::eTransferDstOptimal;
-      image_barrier2.newLayout     = vk::ImageLayout::eGeneral;
-      image_barrier2.image         = dstImage.get();
-      image_barrier2.subresourceRange
-        = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
-
-      copyCmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-                              vk::PipelineStageFlagBits::eTransfer,
-                              {},
-                              0,
-                              nullptr,
-                              0,
-                              nullptr,
-                              1,
-                              &image_barrier2);
-
-      copyCmd.end();
-
-      auto submitInfo               = vk::SubmitInfo();
-      submitInfo.commandBufferCount = 1;
-      submitInfo.pCommandBuffers    = &copyCmd;
-      auto fence = device_->createFenceUnique(vk::FenceCreateInfo());
-      queue_.submit(1, &submitInfo, fence.get());
-      device_->waitForFences(1, &(fence.get()), VK_TRUE, UINT64_MAX);
-
-      // Get layout of the image (including row pitch)
-      auto subResource       = vk::ImageSubresource();
-      subResource.aspectMask = vk::ImageAspectFlagBits::eColor;
-      auto subResourceLayout = vk::SubresourceLayout();
-
-      device_->getImageSubresourceLayout(dstImage.get(), &subResource, &subResourceLayout);
-
-      // Map image memory so we can start copying from it
-      imagedata = reinterpret_cast<const char*>(device_->mapMemory(dstImageMemory.get(), 0, vk::DeviceSize()));
-      imagedata += subResourceLayout.offset;
-
-      /*
-        Save host visible framebuffer image to disk (ppm format)
-      */
-      std::ofstream file("headless.ppm", std::ios::out | std::ios::binary);
-
-      // ppm header
-      file << "P6\n" << kWidth << "\n" << kHeight << "\n" << 255 << "\n";
-
-      // If source is BGR (destination is always RGB) and we can't use blit (which does automatic
-      // conversion), we'll have to manually swizzle color components Check if source is BGR and
-      // needs swizzle
-      std::vector<VkFormat> formatsBGR   = {VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM,
-                                          VK_FORMAT_B8G8R8A8_SNORM};
-      const bool            colorSwizzle = (std::find(formatsBGR.begin(), formatsBGR.end(),
-                                           VK_FORMAT_R8G8B8A8_UNORM) != formatsBGR.end());
-
-      // ppm binary pixel data
-      for (int32_t y = 0; y < kHeight; y++)
-      {
-        unsigned int *row = (unsigned int *)imagedata;
-        for (int32_t x = 0; x < kWidth; x++)
-        {
-          if (colorSwizzle)
-          {
-            file.write((char *)row + 2, 1);
-            file.write((char *)row + 1, 1);
-            file.write((char *)row, 1);
-          }
-          else
-          {
-            file.write((char *)row, 3);
-          }
-          row++;
-        }
-        imagedata += subResourceLayout.rowPitch;
-      }
-      file.close();
-    }
+    render_pass_ = device_->createRenderPassUnique(renderpass_create_info);
   }
 
   ~VkRenderer() {}
@@ -497,14 +344,15 @@ private:
   vk::UniqueCommandBuffer command_buffer_;
   vk::UniqueRenderPass    render_pass_;
 
-  vk::UniqueImage          color_image_;
-  vk::UniqueDeviceMemory   color_image_memory_;
-  vk::UniqueImageView      color_image_view_;
-
   vk::UniqueFramebuffer    framebuffer_;
 
-  vk::UniqueSwapchainKHR     swapchain_;
-  vk::Extent2D               swapchain_extent_;
+  vk::UniqueSwapchainKHR           swapchain_;
+  vk::Extent2D                     swapchain_extent_;
+  std::vector<vk::UniqueImageView> swapchain_image_views_;
+
+  vk::UniqueImage          depth_image_;
+  vk::UniqueDeviceMemory   depth_image_memory_;
+  vk::UniqueImageView      depth_image_view_;
 
   vk::UniqueSurfaceKHR       surface_;
   vk::SurfaceFormatKHR       surface_format_;
