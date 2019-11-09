@@ -22,6 +22,8 @@ else()
   message(STATUS ${GLFW_LIBRARIES})
 endif()
 
-file(GLOB SOURCE ./src/*.cc)
+file(GLOB SOURCE ./src/main.cc)
 add_executable(${PROJECT_NAME} ${SOURCE})
-target_link_libraries(${PROJECT_NAME} ${GLFW_LIBRARIES} ${Vulkan_LIBRARY})
+target_link_libraries(${PROJECT_NAME} ${GLFW_LIBRARIES} ${Vulkan_LIBRARY} ${CMAKE_DL_LIBS})
+
+# CMAKE_DL_LIBS is required to link dlopen, dlclose etc...
